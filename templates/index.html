@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Splice Plate</title>
+
+<style>
+body {
+    margin: 0;
+    font-family: Arial;
+    text-align: center;
+}
+
+h3 {
+    margin: 10px 0;
+}
+
+#container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+canvas {
+    width: 95vw;
+    height: auto;
+    border: 1px solid black;
+}
+
+/* Zoom box - mobile friendly */
+#zoomBox {
+    position: fixed;
+    bottom: 80px;   /* above control buttons */
+    right: 10px;
+    width: 140px;
+    height: 140px;
+    border: 2px solid red;
+    z-index: 10;
+}
+
+/* Buttons */
+.controls {
+    position: fixed;
+    bottom: 0;
+    width: 100%;
+    background: #eee;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.controls button {
+    flex: 1 1 30%;
+    margin: 5px;
+    padding: 12px;
+    font-size: 14px;
+}
+</style>
+</head>
+
+<body>
+
+<h3>Splice Plate Measurement</h3>
+
+<input type="file" id="cameraInput"><br><br>
+
+<canvas id="canvas"></canvas><br>
+
+<canvas id="zoomBox" width="160" height="160"></canvas>
+
+<p id="status">Mode: corner</p>
+
+<script>
+let lastValidX = 0;
+let lastValidY = 0;
+let canvas = document.getElementById("canvas");
+let ctx = canvas.getContext("2d");
+
+let img = new Image();
+let zoomCanvas = document.getElementById("zoomBox");
+let zctx = zoomCanvas.getContext("2d");
+
+let currentX = 0, currentY = 0;
+let mode = "corner";
+
+let corners = [];
+let centers = [];
+let isRectified = false;
+
+// ---------- LOAD IMAGE ----------
+document.getElementById("cameraInput").addEventListener("change", e => {
+    let file = e.target.files[0];
+
+    let reader = new FileReader();
+    reader.onload = ev => img.src = ev.target.result;
+    reader.readAsDataURL(file);
+
+    let fd = new FormData();
+    fd.append("image", file);
+    fetch("/upload", {method:"POST", body:fd});
+});
+
+img.onload = () => {
+    canvas.width = img.width;
+    canvas.height = img.height;
+    draw();
+};
+
+// ---------- DRAW ----------
+function draw() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.drawImage(img,0,0);
+
+    corners.forEach(p => drawPoint(p,"red"));
+    centers.forEach(p => drawPoint(p,"blue"));
+}
+
+function drawPoint(p,color){
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,6,0,2*Math.PI);
+    ctx.fillStyle=color;
+    ctx.fill();
+}
+
+// ---------- TOUCH END ----------
+canvas.addEventListener("touchend", function(e) {
+
+    let x = Math.round(lastValidX);
+    let y = Math.round(lastValidY);
+
+    let clicked = false;
+
+    if(mode==="corner" && !isRectified){
+        if(corners.length<4) {
+            corners.push({x,y});
+            clicked = true;
+        }
+    }
+    else if(mode==="center" && isRectified){
+        centers.push({x,y});
+        clicked = true;
+    }
+
+    if (clicked) {
+        navigator.vibrate(15);
+    }
+
+    setMode(mode);
+    draw();
+});
+
+function updatePosition(clientX, clientY) {
+    let rect = canvas.getBoundingClientRect();
+
+    let x = (clientX - rect.left) * (canvas.width / rect.width);
+    let y = (clientY - rect.top) * (canvas.height / rect.height);
+
+// Always update (even outside)
+currentX = x;
+currentY = y;
+}
+
+// MOUSE MOVE
+canvas.addEventListener("mousemove", function(e) {
+    updatePosition(e.clientX, e.clientY);
+    moveZoomBox(e.clientX, e.clientY);
+    zoom();
+});
+
+// TOUCH MOVE (mobile)
+canvas.addEventListener("touchmove", function(e) {
+    e.preventDefault();
+
+    let t = e.touches[0];
+
+    updatePosition(t.clientX, t.clientY);
+    moveZoomBox(t.clientX, t.clientY);
+    zoom();
+});
+
+canvas.addEventListener("touchstart", function(e) {
+
+    let t = e.touches[0];
+
+    updatePosition(t.clientX, t.clientY);
+    moveZoomBox(t.clientX, t.clientY);
+    zoom();
+});
+
+// ---------- MODE ----------
+function setMode(m){
+    mode = m;
+    document.getElementById("status").innerText =
+        "Mode: "+mode+" | corners:"+corners.length+" | centers:"+centers.length;
+}
+
+// ---------- RECTIFY ----------
+function rectify(){
+
+    if(corners.length!==4){
+        alert("Select 4 corners first");
+        return;
+    }
+
+    let length = prompt("Plate Length (mm)");
+    let width = prompt("Plate Width (mm)");
+
+    fetch("/rectify",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({corners,length,width})
+    })
+    .then(r=>r.blob())
+    .then(blob=>{
+    let url = URL.createObjectURL(blob);
+
+    img.onload = function() {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        draw();
+    };
+
+    img.src = url;
+        corners = [];
+        centers = [];
+        isRectified = true;
+        mode = "center";
+    });
+}
+
+// ---------- PROCESS ----------
+function process(){
+
+    if(!isRectified){
+        alert("Rectify first");
+        return;
+    }
+
+    fetch("/process",{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({centers})
+    })
+    .then(r=>r.blob())
+    .then(blob=>{
+        window.open(URL.createObjectURL(blob));
+    });
+}
+
+// ---------- RESET ----------
+function resetAll(){
+    corners=[];
+    centers=[];
+    isRectified=false;
+    img.src="";
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+}
+
+function undoLast() {
+    if (mode === "corner" && corners.length > 0) {
+        corners.pop();
+    }
+    else if (mode === "center" && centers.length > 0) {
+        centers.pop();
+    }
+
+    draw();
+}
+
+function zoom() {
+    if (!img || !img.complete) return;
+
+    let size = 280;
+
+    // Safe coordinates
+    let sx = currentX - size/2;
+    let sy = currentY - size/2;
+
+    if (sx < 0) sx = 0;
+    if (sy < 0) sy = 0;
+    if (sx + size > img.width) sx = img.width - size;
+    if (sy + size > img.height) sy = img.height - size;
+
+    lastValidX = currentX;
+    lastValidY = currentY;
+
+    zctx.clearRect(0, 0, zoomCanvas.width, zoomCanvas.height);
+
+    try {
+        zctx.drawImage(
+            img,
+            sx,
+            sy,
+            size,
+            size,
+            0,
+            0,
+            zoomCanvas.width,
+            zoomCanvas.height
+        );
+    } catch(e) {
+        console.log("Zoom error:", e);
+        return;
+    }
+
+    // Crosshair
+    let cx = (currentX - sx) * (zoomCanvas.width / size);
+    let cy = (currentY - sy) * (zoomCanvas.height / size);
+
+    zctx.beginPath();
+    zctx.moveTo(cx, 0);
+    zctx.lineTo(cx, zoomCanvas.height);
+    zctx.moveTo(0, cy);
+    zctx.lineTo(zoomCanvas.width, cy);
+    zctx.strokeStyle = "yellow";
+    zctx.lineWidth = 2;
+    zctx.stroke();
+
+    // Circle
+    zctx.beginPath();
+    zctx.arc(cx, cy, zoomCanvas.width/4, 0, 2*Math.PI);
+    zctx.strokeStyle = "lime";
+    zctx.lineWidth = 2;
+    zctx.stroke();
+}
+
+function moveZoomBox(clientX, clientY) {
+    let box = zoomCanvas;
+
+    let offset = 20;
+
+    let left = clientX + offset;
+    let top = clientY + offset;
+
+    // Disable bottom/right (CRITICAL FIX)
+    box.style.bottom = "auto";
+    box.style.right = "auto";
+
+    // Clamp instead of flip (we'll fix this next)
+    if (left + box.width > window.innerWidth) {
+        left = window.innerWidth - box.width - 10;
+    }
+
+    if (top + box.height > window.innerHeight) {
+        top = window.innerHeight - box.height - 10;
+    }
+
+    box.style.left = left + "px";
+    box.style.top = top + "px";
+}
+
+</script>
+<div style="
+    position:fixed;
+    bottom:0;
+    width:100%;
+    background:#eee;
+    display:flex;
+    flex-wrap:wrap;
+    justify-content:center;
+">
+
+<button onclick="setMode('corner')">Corner</button>
+<button onclick="setMode('center')">Center</button>
+<button onclick="rectify()">Rectify</button>
+<button onclick="process()">Process</button>
+<button onclick="resetAll()">Reset</button>
+<button onclick="undoLast()">Undo</button>
+
+</div>
+</body>
+</html>
